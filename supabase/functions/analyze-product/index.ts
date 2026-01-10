@@ -9,6 +9,7 @@ const CORS_HEADERS = {
 
 interface AnalyzeRequest {
   code: string;
+  imageUri?: string; // Optional: For future image-based analysis
 }
 
 interface AnalyzeResponse {

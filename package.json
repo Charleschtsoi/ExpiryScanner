@@ -13,6 +13,7 @@
     "babel-preset-expo": "^54.0.9",
     "expo": "~54.0.31",
     "expo-camera": "~17.0.10",
+    "expo-constants": "^18.0.13",
     "expo-device": "~8.0.10",
     "expo-notifications": "~0.32.16",
     "expo-status-bar": "~3.0.9",

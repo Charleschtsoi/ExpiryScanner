@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 // Configure notification behavior
@@ -8,6 +9,8 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
   }),
 });
 
@@ -39,14 +42,21 @@ export async function registerForPushNotificationsAsync(): Promise<string | null
 
   // Get the Expo push token
   try {
+    // Get project ID from environment variable, app.json extra, or use the configured one
+    const projectId = 
+      process.env.EXPO_PUBLIC_PROJECT_ID || 
+      Constants.expoConfig?.extra?.eas?.projectId ||
+      'dab599a4-4cde-4dcf-9a07-8a2bc4760023'; // Fallback to configured project ID
+    
     const token = await Notifications.getExpoPushTokenAsync({
-      projectId: process.env.EXPO_PUBLIC_PROJECT_ID || undefined,
+      projectId: projectId,
     });
     
-    console.log('Push notification token:', token.data);
+    console.log('✅ Push notification token registered:', token.data);
+    console.log('📱 Project ID:', projectId);
     return token.data;
   } catch (error) {
-    console.error('Error getting push token:', error);
+    console.error('❌ Error getting push token:', error);
     return null;
   }
 

@@ -51,6 +51,7 @@ export default function ScannerScreen() {
   const analyzeProduct = useCallback(async (code: string) => {
     // Prevent duplicate analysis of the same code
     if (lastAnalyzedCodeRef.current === code) {
+      console.log('Skipping duplicate analysis for code:', code);
       return;
     }
 
@@ -58,19 +59,42 @@ export default function ScannerScreen() {
     setIsAnalyzing(true);
     setProductData(null);
 
+    console.log('Starting product analysis for code:', code);
+
     try {
+      // Check if Supabase client is configured
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+      if (!supabaseUrl) {
+        throw new Error('Supabase URL is not configured. Please set EXPO_PUBLIC_SUPABASE_URL environment variable.');
+      }
+
+      console.log('Invoking Edge Function: analyze-product');
+      
       const { data, error } = await supabase.functions.invoke('analyze-product', {
         body: { code },
       });
 
+      console.log('Edge Function response - error:', error);
+      console.log('Edge Function response - data:', data);
+
       if (error) {
-        throw error;
+        console.error('Edge Function error details:', {
+          message: error.message,
+          status: error.status,
+          context: error.context,
+        });
+        throw new Error(error.message || `Edge Function error: ${JSON.stringify(error)}`);
       }
 
       if (data) {
+        // Check if the response contains an error property
+        if (data.error) {
+          throw new Error(data.error || 'Error from Edge Function');
+        }
+
         const productData = data as ProductData;
         setProductData(productData);
-        console.log('Product analyzed:', productData);
+        console.log('Product analyzed successfully:', productData);
 
         // Handle manualEntryRequired flag - automatically open manual entry modal
         if (productData.manualEntryRequired) {
@@ -93,11 +117,21 @@ export default function ScannerScreen() {
         throw new Error('No data returned from analysis');
       }
     } catch (error) {
-      console.error('Error analyzing product:', error);
+      console.error('Error analyzing product - full error:', error);
       lastAnalyzedCodeRef.current = null; // Reset on error to allow retry
+      
+      // Extract meaningful error message
+      let errorMessage = 'Failed to analyze product. Please try again.';
+      
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'object' && error !== null) {
+        errorMessage = JSON.stringify(error);
+      }
+      
       Alert.alert(
         'Analysis Failed',
-        error instanceof Error ? error.message : 'Failed to analyze product. Please try again.',
+        errorMessage + '\n\nCheck console logs for more details.',
         [{ text: 'OK', onPress: () => setIsAnalyzing(false) }]
       );
     } finally {
