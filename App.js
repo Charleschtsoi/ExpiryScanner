@@ -5,6 +5,7 @@ import { registerForPushNotificationsAsync } from './utils/notifications';
 import { analyzeProductFromBarcode, isAIAnalysisConfigured, AIAnalysisError } from './services/aiAnalysis';
 import { addInventoryItem } from './services/inventory';
 import InventoryScreen from './screens/InventoryScreen';
+import ManualEntryScreen from './screens/ManualEntryScreen';
 
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -20,6 +21,7 @@ export default function App() {
   const [manualExpiryDate, setManualExpiryDate] = useState('');
   const [aiErrorMessage, setAiErrorMessage] = useState(''); // Store the AI error message
   const [showInventory, setShowInventory] = useState(false); // Control inventory screen visibility
+  const [showManualEntry, setShowManualEntry] = useState(false); // Control manual entry screen visibility
   const [savingToInventory, setSavingToInventory] = useState(false); // Track save operation
 
   // Register for push notifications on mount
@@ -65,10 +67,16 @@ export default function App() {
       return;
     }
 
-    // Reset states and start scanning
+    // Reset ALL states including manual entry to ensure clean scan session
     setScanned(false);
     setScannedProduct(null);
     setIsAnalyzing(false);
+    setManualEntryVisible(false);  // Close manual entry modal if open
+    setFailedBarcode(null);          // Clear previous failed barcode
+    setAiErrorMessage('');           // Clear error messages
+    setManualProductName('');        // Clear manual entry fields
+    setManualCategory('');
+    setManualExpiryDate('');
     setIsScanning(true);
   };
 
@@ -96,6 +104,15 @@ export default function App() {
   // Show inventory screen if requested
   if (showInventory) {
     return <InventoryScreen onBack={() => setShowInventory(false)} />;
+  }
+
+  // Show manual entry screen if requested
+  if (showManualEntry) {
+    return <ManualEntryScreen 
+      onBack={() => setShowManualEntry(false)} 
+      initialBarcode={failedBarcode || undefined}
+      onViewInventory={() => setShowInventory(true)}
+    />;
   }
 
   // Show home screen if not scanning
@@ -140,6 +157,14 @@ export default function App() {
             <Text style={styles.inventoryButtonText}>View Inventory</Text>
           </TouchableOpacity>
 
+          {/* Manual Entry Button */}
+          <TouchableOpacity 
+            style={styles.manualEntryButton}
+            onPress={() => setShowManualEntry(true)}
+          >
+            <Text style={styles.manualEntryButtonText}>Manual Entry</Text>
+          </TouchableOpacity>
+
           {!permission.granted && (
             <Text style={styles.permissionHint}>
               Camera permission is required to scan barcodes
@@ -179,6 +204,22 @@ export default function App() {
 
       // Call AI analysis service to get real product data
       const analysisResult = await analyzeProductFromBarcode(data);
+
+      // Check if manual entry is required (even in successful response)
+      if (analysisResult.manualEntryRequired) {
+        console.log('✅ Analysis indicates manual entry required, opening manual entry screen');
+        
+        // Store the scanned barcode for manual entry
+        setFailedBarcode(data);
+        setScannedProduct(null);
+        
+        // Stop scanning and open manual entry screen (full page)
+        setIsScanning(false);
+        setIsAnalyzing(false);
+        setScanned(false);
+        setShowManualEntry(true);
+        return;
+      }
 
       // Calculate status message based on shelf life
       const daysLeft = analysisResult.shelfLifeDays;
@@ -227,26 +268,40 @@ export default function App() {
 
       // Determine error message based on error type
       let errorMessage = 'The AI failed to understand this product.';
+      let shouldOpenManualEntry = true; // Default to opening manual entry for all errors
+      
       if (error instanceof AIAnalysisError) {
+        // Check if error contains manualEntryRequired in originalError data
+        if (error.originalError && typeof error.originalError === 'object') {
+          if (error.originalError.manualEntryRequired === true || 
+              (error.originalError.data && error.originalError.data.manualEntryRequired === true)) {
+            errorMessage = 'The AI could not identify this product. Please enter the product details manually.';
+            shouldOpenManualEntry = true;
+          }
+        }
+        
         if (error.code === 'EDGE_FUNCTION_ERROR' || error.code === 'AI_SERVICE_ERROR') {
           errorMessage = 'The AI service encountered an error while analyzing this product. Please enter the product details manually.';
         } else if (error.code === 'NOT_CONFIGURED') {
           errorMessage = 'AI service is not configured. You can still enter product details manually to check the expiry date.';
         } else if (error.code === 'MANUAL_ENTRY_REQUIRED') {
           errorMessage = 'The AI could not identify this product. Please enter the batch code and product details manually.';
+        } else if (error.code === 'AI_ANALYSIS_FAILED' || error.code === 'AI_ERROR') {
+          errorMessage = 'Could not identify this product automatically. Please enter the details manually.';
         }
       } else {
         // Generic error from network or other issues
         errorMessage = 'The AI service encountered an error. Please enter the batch code and product details manually to check the expiry date.';
       }
 
-      // Store error message to display in modal
+      // Store error message (for reference, though screen doesn't use it)
       setAiErrorMessage(errorMessage);
 
-      // Automatically open manual entry modal with friendly message
-      setManualEntryVisible(true);
-      
-      console.log('❌ AI failed, opening manual entry modal:', errorMessage);
+      // Always open manual entry screen for errors (all errors should allow manual entry)
+      if (shouldOpenManualEntry) {
+        setShowManualEntry(true);
+        console.log('❌ AI failed, opening manual entry screen:', errorMessage);
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -306,7 +361,7 @@ export default function App() {
   };
 
   // Handle manual product entry submission
-  const handleManualProductSubmit = () => {
+  const handleManualProductSubmit = async () => {
     if (!manualProductName.trim() || !manualExpiryDate.trim()) {
       Alert.alert(
         'Missing Information',
@@ -317,13 +372,13 @@ export default function App() {
     }
 
     // Calculate days left from expiry date
+    let savedName, savedCategory, savedExpiryDate, daysLeft, status;
     try {
       const expiryDate = new Date(manualExpiryDate);
       const now = new Date();
       const diffTime = expiryDate.getTime() - now.getTime();
-      const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-      let status;
       if (daysLeft < 0) {
         status = 'EXPIRED';
       } else if (daysLeft === 0) {
@@ -335,11 +390,32 @@ export default function App() {
       }
 
       // Store values before clearing for logging
-      const savedName = manualProductName.trim();
-      const savedCategory = manualCategory.trim() || 'General';
-      const savedExpiryDate = manualExpiryDate;
+      savedName = manualProductName.trim();
+      savedCategory = manualCategory.trim() || 'General';
+      savedExpiryDate = manualExpiryDate;
+    } catch (error) {
+      Alert.alert(
+        'Invalid Date',
+        'Please enter a valid expiry date (YYYY-MM-DD format).',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
 
-      // Update product state with manual entry data
+    // Show loading state
+    setSavingToInventory(true);
+
+    try {
+      // Automatically save to inventory
+      await addInventoryItem({
+        barcode: failedBarcode || 'Manual Entry',
+        product_name: savedName,
+        category: savedCategory,
+        expiry_date: savedExpiryDate,
+        ai_confidence: 1.0, // 100% confidence for manual entry
+      });
+
+      // Update product state with manual entry data (for display if needed)
       setScannedProduct({
         barcode: failedBarcode || 'Manual Entry',
         name: savedName,
@@ -351,7 +427,7 @@ export default function App() {
         isManualEntry: true, // Flag to indicate manual entry
       });
 
-      // Close manual entry modal and show results
+      // Close manual entry modal
       setManualEntryVisible(false);
       setFailedBarcode(null);
       setManualProductName('');
@@ -359,18 +435,76 @@ export default function App() {
       setManualExpiryDate('');
       setAiErrorMessage('');
 
-      console.log('✅ Manual product entry saved:', {
+      console.log('✅ Manual product entry saved to inventory:', {
         name: savedName,
         category: savedCategory,
         expiryDate: savedExpiryDate,
         daysLeft,
       });
-    } catch (error) {
+
+      // Show success message and allow user to continue scanning or go home
       Alert.alert(
-        'Invalid Date',
-        'Please enter a valid expiry date (YYYY-MM-DD format).',
-        [{ text: 'OK' }]
+        'Success',
+        'Product saved to inventory!',
+        [
+          {
+            text: 'Continue Scanning',
+            onPress: () => {
+              // Reset product state and allow new scan
+              setScannedProduct(null);
+              setIsScanning(true); // Continue scanning
+            },
+          },
+          {
+            text: 'View Inventory',
+            onPress: () => {
+              setScannedProduct(null);
+              setIsScanning(false);
+              setShowInventory(true);
+            },
+          },
+          {
+            text: 'OK',
+            onPress: () => {
+              // Return to home screen
+              setScannedProduct(null);
+              setIsScanning(false);
+            },
+          },
+        ]
       );
+    } catch (error) {
+      console.error('Error saving manual entry to inventory:', error);
+      
+      // Show error but keep product data so user can retry
+      Alert.alert(
+        'Error',
+        'Failed to save product to inventory. Please try again.',
+        [
+          {
+            text: 'Retry',
+            onPress: () => {
+              // Keep modal open for retry
+              setSavingToInventory(false);
+            },
+          },
+          {
+            text: 'Cancel',
+            onPress: () => {
+              // Close modal and reset
+              setManualEntryVisible(false);
+              setFailedBarcode(null);
+              setManualProductName('');
+              setManualCategory('');
+              setManualExpiryDate('');
+              setAiErrorMessage('');
+              setSavingToInventory(false);
+            },
+          },
+        ]
+      );
+    } finally {
+      setSavingToInventory(false);
     }
   };
 
@@ -519,7 +653,7 @@ export default function App() {
       <Modal
         animationType="slide"
         transparent={true}
-        visible={manualEntryVisible}
+        visible={manualEntryVisible && !isScanning}
         onRequestClose={() => {
           setManualEntryVisible(false);
           setFailedBarcode(null);
@@ -881,6 +1015,23 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
     minWidth: 250,
+  },
+  manualEntryButton: {
+    backgroundColor: '#34C759',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    marginTop: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  manualEntryButtonText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '600',
   },
   inventoryButtonText: {
     color: '#fff',

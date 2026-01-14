@@ -83,6 +83,39 @@ export default function ScannerScreen() {
           status: error.status,
           context: error.context,
         });
+        
+        // Try to read error response body to check for manualEntryRequired
+        let errorBody = null;
+        try {
+          if (error.context?._bodyBlob && !error.context.bodyUsed) {
+            errorBody = await error.context._bodyBlob.text();
+          } else if (error.context?._bodyInit?._data) {
+            const response = new Response(error.context._bodyInit);
+            errorBody = await response.text();
+          }
+        } catch (e) {
+          // Failed to read error body, continue
+        }
+        
+        // Check if error response contains manualEntryRequired flag
+        if (errorBody) {
+          try {
+            const errorJson = JSON.parse(errorBody);
+            if (errorJson.manualEntryRequired === true) {
+              // Error response indicates manual entry needed - open manual entry form
+              console.log('✅ Error response indicates manual entry required');
+              setManualCode(code);
+              setManualEntryRequired(true);
+              setProductModalVisible(false);
+              setIsAnalyzing(false);
+              setManualEntryVisible(true);
+              return;
+            }
+          } catch (e) {
+            // Not JSON, continue with error handling
+          }
+        }
+        
         throw new Error(error.message || `Edge Function error: ${JSON.stringify(error)}`);
       }
 
@@ -129,11 +162,13 @@ export default function ScannerScreen() {
         errorMessage = JSON.stringify(error);
       }
       
-      Alert.alert(
-        'Analysis Failed',
-        errorMessage + '\n\nCheck console logs for more details.',
-        [{ text: 'OK', onPress: () => setIsAnalyzing(false) }]
-      );
+      // Instead of showing Alert, open manual entry form so user can still enter product details
+      console.log('❌ Analysis failed, opening manual entry form');
+      setManualCode(code);
+      setManualEntryRequired(true);
+      setProductModalVisible(false);
+      setIsAnalyzing(false);
+      setManualEntryVisible(true);
     } finally {
       setIsAnalyzing(false);
     }

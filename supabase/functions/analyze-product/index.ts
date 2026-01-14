@@ -88,130 +88,166 @@ serve(async (req) => {
     if (!openAIResponse.ok) {
       const errorData = await openAIResponse.text();
       console.error('OpenAI API error:', errorData);
-      return new Response(
-        JSON.stringify({ error: 'Failed to analyze product with AI' }),
-        {
-          status: 500,
-          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      
+      // Try to parse error details for better error messages
+      let errorMessage = 'Failed to analyze product with AI';
+      let errorCode = 'OPENAI_API_ERROR';
+      
+      try {
+        const errorJson = JSON.parse(errorData);
+        const openAIError = errorJson.error || {};
+        const errorType = openAIError.type || '';
+        const errorCodeValue = openAIError.code || '';
+        
+        // Provide more specific error messages based on error type
+        if (openAIResponse.status === 401) {
+          errorMessage = 'OpenAI API key is invalid or expired';
+          errorCode = 'INVALID_API_KEY';
+        } else if (openAIResponse.status === 429) {
+          errorMessage = 'OpenAI API rate limit exceeded. Please try again later';
+          errorCode = 'RATE_LIMIT_EXCEEDED';
+        } else if (openAIResponse.status === 500 || openAIResponse.status === 503) {
+          errorMessage = 'OpenAI service temporarily unavailable. Please try again later';
+          errorCode = 'SERVICE_UNAVAILABLE';
+        } else if (errorType === 'insufficient_quota' || errorCodeValue === 'insufficient_quota') {
+          errorMessage = 'OpenAI API quota exceeded. Please check your account credits';
+          errorCode = 'QUOTA_EXCEEDED';
+        } else if (errorType === 'invalid_request_error') {
+          errorMessage = 'Invalid request to OpenAI API';
+          errorCode = 'INVALID_REQUEST';
         }
-      );
-    }
+        
+        console.error('OpenAI error details:', {
+          status: openAIResponse.status,
+          type: errorType,
+          code: errorCodeValue,
+          message: openAIError.message,
+        });
+      } catch (parseError) {
+        // If we can't parse the error, use the raw error data for logging
+        console.error('Could not parse OpenAI error response:', errorData);
+      }
+      
+      // Instead of returning 500 immediately, try database fallback first
+      // This allows the app to still work even if OpenAI is down
+      console.log('OpenAI API failed, attempting database fallback...');
+      
+      // Continue to database fallback logic below instead of returning error
+      // This will be handled in the fallback section
+    } else {
+      // OpenAI API call succeeded - process the response
+      const openAIData = await openAIResponse.json();
+      const aiContent = openAIData.choices[0]?.message?.content;
 
-    const openAIData = await openAIResponse.json();
-    const aiContent = openAIData.choices[0]?.message?.content;
-
-    if (!aiContent) {
-      return new Response(
-        JSON.stringify({ error: 'No response from AI' }),
-        {
-          status: 500,
-          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      if (!aiContent) {
+        console.error('OpenAI returned empty response');
+        // Continue to fallback
+      } else {
+        // Parse AI response - extract JSON from markdown code blocks if present
+        let parsedResponse: AnalyzeResponse;
+        try {
+          // Try to extract JSON from markdown code blocks
+          const jsonMatch = aiContent.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/) || aiContent.match(/\{[\s\S]*\}/);
+          const jsonString = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : aiContent;
+          parsedResponse = JSON.parse(jsonString.trim());
+        } catch (parseError) {
+          console.error('Failed to parse AI response:', aiContent);
+          // Fallback response
+          parsedResponse = {
+            productName: 'Unknown Product',
+            category: 'General',
+            expiryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days from now
+            confidenceScore: 0.3,
+          };
         }
-      );
-    }
 
-    // Parse AI response - extract JSON from markdown code blocks if present
-    let parsedResponse: AnalyzeResponse;
+        // Validate and normalize AI response
+        const aiResponse: AnalyzeResponse = {
+          productName: parsedResponse.productName || 'Unknown Product',
+          category: parsedResponse.category || 'General',
+          expiryDate: parsedResponse.expiryDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          confidenceScore: Math.max(0, Math.min(1, parsedResponse.confidenceScore || 0.5)),
+        };
+
+        // Validation: Check if AI response is reliable
+        // Trigger fallback if confidenceScore < 0.6 OR productName is "Unknown Product"
+        const shouldUseFallback = 
+          aiResponse.confidenceScore < 0.6 || 
+          aiResponse.productName.toLowerCase().includes('unknown');
+
+        if (!shouldUseFallback) {
+          // AI response is reliable - return it
+          return new Response(
+            JSON.stringify(aiResponse),
+            {
+              status: 200,
+              headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+        // Otherwise continue to database fallback
+      }
+    }
+    
+    // Fallback: Database Lookup (runs if OpenAI failed or AI response was unreliable)
     try {
-      // Try to extract JSON from markdown code blocks
-      const jsonMatch = aiContent.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/) || aiContent.match(/\{[\s\S]*\}/);
-      const jsonString = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : aiContent;
-      parsedResponse = JSON.parse(jsonString.trim());
-    } catch (parseError) {
-      console.error('Failed to parse AI response:', aiContent);
-      // Fallback response
-      parsedResponse = {
-        productName: 'Unknown Product',
-        category: 'General',
-        expiryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days from now
-        confidenceScore: 0.3,
-      };
+      // Create Supabase client for database access
+      const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
+      const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+      
+      if (!supabaseUrl || !supabaseServiceKey) {
+        console.warn('Supabase credentials not configured, skipping database fallback');
+      } else {
+        const supabaseClient = createClient(supabaseUrl, supabaseServiceKey);
+        
+        // Query product_master_list table
+        const { data: dbProduct, error: dbError } = await supabaseClient
+          .from('product_master_list')
+          .select('code, name, category, shelf_life_days')
+          .eq('code', code.trim())
+          .single();
+
+        if (!dbError && dbProduct) {
+          // Database match found - prioritize DB data (100% accurate)
+          const dbExpiryDate = dbProduct.shelf_life_days 
+            ? new Date(Date.now() + dbProduct.shelf_life_days * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+            : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Default 7 days if shelf_life_days is null
+
+          const response: AnalyzeResponse = {
+            productName: dbProduct.name,
+            category: dbProduct.category || 'General',
+            expiryDate: dbExpiryDate,
+            confidenceScore: 1.0, // 100% confidence for database matches
+          };
+
+          return new Response(
+            JSON.stringify(response),
+            {
+              status: 200,
+              headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+            }
+          );
+        } else {
+          // Database lookup failed - return manual entry flag
+          console.log('Database lookup failed for code:', code);
+        }
+      }
+    } catch (dbLookupError) {
+      console.error('Error during database fallback lookup:', dbLookupError);
+      // Continue to manual entry fallback
     }
 
-    // Validate and normalize AI response
-    const aiResponse: AnalyzeResponse = {
-      productName: parsedResponse.productName || 'Unknown Product',
-      category: parsedResponse.category || 'General',
-      expiryDate: parsedResponse.expiryDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      confidenceScore: Math.max(0, Math.min(1, parsedResponse.confidenceScore || 0.5)),
+    // Both AI and DB failed - require manual entry
+    const response: AnalyzeResponse = {
+      productName: 'Unknown Product',
+      category: 'General',
+      expiryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      confidenceScore: 0,
+      manualEntryRequired: true,
     };
 
-    // Validation: Check if AI response is reliable
-    // Trigger fallback if confidenceScore < 0.6 OR productName is "Unknown Product"
-    const shouldUseFallback = 
-      aiResponse.confidenceScore < 0.6 || 
-      aiResponse.productName.toLowerCase().includes('unknown');
-
-    // Fallback: Database Lookup
-    if (shouldUseFallback) {
-      try {
-        // Create Supabase client for database access
-        const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
-        const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-        
-        if (!supabaseUrl || !supabaseServiceKey) {
-          console.warn('Supabase credentials not configured, skipping database fallback');
-        } else {
-          const supabaseClient = createClient(supabaseUrl, supabaseServiceKey);
-          
-          // Query product_master_list table
-          const { data: dbProduct, error: dbError } = await supabaseClient
-            .from('product_master_list')
-            .select('code, name, category, shelf_life_days')
-            .eq('code', code.trim())
-            .single();
-
-          if (!dbError && dbProduct) {
-            // Database match found - prioritize DB data (100% accurate)
-            const dbExpiryDate = dbProduct.shelf_life_days 
-              ? new Date(Date.now() + dbProduct.shelf_life_days * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-              : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // Default 7 days if shelf_life_days is null
-
-            const response: AnalyzeResponse = {
-              productName: dbProduct.name,
-              category: dbProduct.category || 'General',
-              expiryDate: dbExpiryDate,
-              confidenceScore: 1.0, // 100% confidence for database matches
-            };
-
-            return new Response(
-              JSON.stringify(response),
-              {
-                status: 200,
-                headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-              }
-            );
-          } else {
-            // Database lookup failed - return manual entry flag
-            console.log('Database lookup failed for code:', code);
-          }
-        }
-      } catch (dbLookupError) {
-        console.error('Error during database fallback lookup:', dbLookupError);
-        // Continue to manual entry fallback
-      }
-
-      // Both AI and DB failed - require manual entry
-      const response: AnalyzeResponse = {
-        productName: 'Unknown Product',
-        category: 'General',
-        expiryDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        confidenceScore: 0,
-        manualEntryRequired: true,
-      };
-
-      return new Response(
-        JSON.stringify(response),
-        {
-          status: 200,
-          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-        }
-      );
-    }
-
-    // AI response is reliable - return it
     return new Response(
-      JSON.stringify(aiResponse),
+      JSON.stringify(response),
       {
         status: 200,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },

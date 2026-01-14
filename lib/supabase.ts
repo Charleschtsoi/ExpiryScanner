@@ -51,8 +51,25 @@ const placeholderUrl = 'https://placeholder-project-id.supabase.co';
 const placeholderKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
 
 // Ensure we always pass valid strings to createClient
+// CRITICAL: If using placeholder credentials, Edge Functions will return 401
 const finalUrl = (isConfigured && supabaseUrl) ? supabaseUrl : placeholderUrl;
 const finalKey = (isConfigured && supabaseAnonKey) ? supabaseAnonKey : placeholderKey;
+
+// Warn if using placeholders (this will cause 401 errors with Edge Functions)
+if (finalUrl === placeholderUrl || finalKey === placeholderKey) {
+  console.warn('⚠️ WARNING: Supabase client is using PLACEHOLDER credentials!');
+  console.warn('⚠️ This will cause 401 errors when calling Edge Functions.');
+  console.warn('⚠️ Please ensure EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY are set in .env');
+  console.warn('⚠️ Then restart your Expo dev server with: npx expo start --clear');
+}
+
+// Warn if using publishable key instead of JWT anon key
+const keyIsPublishable = finalKey.startsWith('sb_publishable_');
+if (keyIsPublishable && finalKey !== placeholderKey) {
+  console.warn('⚠️ WARNING: Supabase client initialized with PUBLISHABLE key instead of JWT anon key!');
+  console.warn('⚠️ This will cause 401 errors with Edge Functions.');
+  console.warn('⚠️ Please update .env file with the JWT anon key (starts with "eyJ") and restart Expo dev server.');
+}
 
 // Create Supabase client with error handling
 let supabaseClient;

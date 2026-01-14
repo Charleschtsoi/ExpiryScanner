@@ -65,9 +65,9 @@ supabase functions list
 
 ---
 
-### ❌ Issue 3: OpenAI API Key Not Set
+### ❌ Issue 3: OpenAI API Key Not Set or Invalid
 
-**Problem:** Edge Function returns "OpenAI API key is not configured" error.
+**Problem:** Edge Function returns "OpenAI API key is not configured" error or 500 errors.
 
 **Solution:**
 ```bash
@@ -82,6 +82,14 @@ supabase secrets list
 - Go to https://platform.openai.com/api-keys
 - Create a new API key or use an existing one
 - Copy the key (starts with `sk-`)
+
+**Common OpenAI API Errors:**
+- **401 Unauthorized**: API key is invalid or expired - generate a new key
+- **429 Rate Limit**: Too many requests - wait a moment and try again
+- **500/503 Service Unavailable**: OpenAI service is down - try again later
+- **Insufficient Quota**: Account has no credits - add credits to your OpenAI account
+
+**Note:** The app will automatically fall back to manual entry if OpenAI API fails, so the app remains functional.
 
 ---
 
@@ -130,7 +138,79 @@ supabase secrets list
 
 ---
 
-### ❌ Issue 6: Service Role Key Not Set (for Database Fallback)
+### ❌ Issue 6: 401 Unauthorized Error
+
+**Problem:** Edge Function returns 401 error when called from the app.
+
+**Common Causes:**
+1. **Wrong anon key format**: Using publishable key (`sb_publishable_*`) instead of JWT anon key (`eyJ*`)
+2. **Placeholder credentials**: `.env` file has placeholder values
+3. **Environment variables not loaded**: Expo dev server wasn't restarted after updating `.env`
+
+**Solutions:**
+
+1. **Check your `.env` file:**
+   ```bash
+   cat .env | grep EXPO_PUBLIC_SUPABASE_ANON_KEY
+   ```
+   - Should start with `eyJ` (JWT token format)
+   - Should NOT start with `sb_publishable_`
+
+2. **Get the correct anon key:**
+   - Go to https://app.supabase.com
+   - Select your project
+   - Go to Settings → API
+   - Copy the **"anon public"** key (NOT the publishable key)
+   - It should start with `eyJ` (it's a JWT token)
+
+3. **Update `.env` and restart:**
+   ```bash
+   # Update .env file with correct JWT anon key
+   # Then restart Expo:
+   npx expo start --clear
+   ```
+
+---
+
+### ❌ Issue 7: 500 Internal Server Error
+
+**Problem:** Edge Function returns 500 error or "Failed to analyze product with AI".
+
+**Common Causes:**
+1. **OpenAI API key issues**: Invalid, expired, or quota exceeded
+2. **OpenAI API service issues**: Rate limits or service unavailable
+3. **Network/timeout issues**: Request to OpenAI API timed out
+
+**Solutions:**
+
+1. **Check OpenAI API key:**
+   ```bash
+   supabase secrets list | grep OPENAI_API_KEY
+   ```
+   - Verify the key is set
+   - Test the key directly with OpenAI API
+
+2. **Check OpenAI account:**
+   - Go to https://platform.openai.com/account/usage
+   - Verify you have credits/quota available
+   - Check if key has proper permissions
+
+3. **Common OpenAI errors:**
+   - **401**: API key invalid - generate a new key
+   - **429**: Rate limit exceeded - wait and retry
+   - **500/503**: Service unavailable - try again later
+   - **Insufficient quota**: Add credits to your account
+
+4. **Fallback behavior:**
+   - The app will automatically fall back to manual entry if AI fails
+   - Database lookup will be attempted if configured
+   - User can always enter product details manually
+
+**Note:** The app is designed to gracefully handle OpenAI failures - it will show a manual entry form instead of crashing.
+
+---
+
+### ❌ Issue 8: Service Role Key Not Set (for Database Fallback)
 
 **Problem:** Database fallback doesn't work (but AI might still work).
 
@@ -175,6 +255,34 @@ supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 
 ---
 
+## Error Handling and User Messages
+
+The app now provides user-friendly error messages instead of technical errors:
+
+**User-Friendly Error Messages:**
+- "AI service temporarily unavailable" → OpenAI API is down, manual entry available
+- "Could not identify this product automatically" → AI failed, manual entry form opens
+- "Authentication failed" → Supabase credentials issue, restart app
+- "Service temporarily unavailable" → Network/server issue, try again later
+
+**Error Codes:**
+- `NOT_CONFIGURED`: Supabase credentials missing
+- `PLACEHOLDER_CREDENTIALS`: Using placeholder values in `.env`
+- `WRONG_KEY_TYPE`: Using publishable key instead of JWT anon key
+- `AI_NOT_CONFIGURED`: OpenAI API key not set
+- `AI_AUTH_FAILED`: OpenAI API authentication failed
+- `AI_RATE_LIMIT`: OpenAI rate limit exceeded
+- `AI_SERVICE_UNAVAILABLE`: OpenAI service down
+- `AI_ANALYSIS_FAILED`: AI couldn't analyze product (falls back to manual entry)
+- `AUTH_FAILED`: Supabase authentication failed
+- `SERVER_ERROR`: Edge Function server error
+- `INVALID_REQUEST`: Invalid request format
+
+**Fallback Behavior:**
+- If AI analysis fails → Database lookup attempted
+- If database lookup fails → Manual entry form opens automatically
+- App never crashes - always provides a way to continue
+
 ## Debugging Steps
 
 ### 1. Check Console Logs
@@ -188,6 +296,8 @@ In your app, look for these console messages:
 ❌ Bad: "Supabase URL is not configured"
 ❌ Bad: "Edge Function error: ..."
 ❌ Bad: "OpenAI API key is not configured"
+❌ Bad: "401 Unauthorized" (check anon key format)
+❌ Bad: "500 Internal Server Error" (check OpenAI API key)
 ```
 
 ### 2. Check Edge Function Logs
