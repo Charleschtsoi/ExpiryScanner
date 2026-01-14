@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Button, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, ScrollView } from 'react-native';
+import { StyleSheet, Text, View, Button, TouchableOpacity, Modal, ActivityIndicator, Alert, TextInput, ScrollView, Image } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import { registerForPushNotificationsAsync } from './utils/notifications';
 import { analyzeProductFromBarcode, isAIAnalysisConfigured, AIAnalysisError } from './services/aiAnalysis';
 import { addInventoryItem } from './services/inventory';
@@ -15,8 +16,8 @@ export default function App() {
   // Manual entry state (when AI fails)
   const [manualEntryVisible, setManualEntryVisible] = useState(false);
   const [failedBarcode, setFailedBarcode] = useState(null); // Store the barcode that failed
-  const [manualProductName, setManualProductName] = useState('');
-  const [manualCategory, setManualCategory] = useState('');
+  const [manualProductImage, setManualProductImage] = useState<string | null>(null); // Product image URI
+  const [manualBatchCode, setManualBatchCode] = useState(''); // Batch code input
   const [manualExpiryDate, setManualExpiryDate] = useState('');
   const [aiErrorMessage, setAiErrorMessage] = useState(''); // Store the AI error message
   const [showInventory, setShowInventory] = useState(false); // Control inventory screen visibility
@@ -209,9 +210,13 @@ export default function App() {
       // Stop scanning after successful scan (camera will be hidden, result modal will show)
       setIsScanning(false);
     } catch (error) {
-      console.error('❌ Error analyzing product:', error);
+      // Silently handle error - don't show error messages, just open manual entry form
+      // Only log to console for debugging (not console.error to avoid error overlays)
+      if (__DEV__) {
+        console.log('AI analysis failed, opening manual entry form');
+      }
 
-      // Stop scanning and AI analysis
+      // Immediately stop scanning and reset states - do this first
       setIsScanning(false);
       setIsAnalyzing(false);
       setScanned(false);
@@ -221,32 +226,15 @@ export default function App() {
       setScannedProduct(null);
 
       // Clear any previous manual entries
-      setManualProductName('');
-      setManualCategory('');
+      setManualProductImage(null);
+      setManualBatchCode(data || ''); // Pre-fill with scanned barcode
       setManualExpiryDate('');
 
-      // Determine error message based on error type
-      let errorMessage = 'The AI failed to understand this product.';
-      if (error instanceof AIAnalysisError) {
-        if (error.code === 'EDGE_FUNCTION_ERROR' || error.code === 'AI_SERVICE_ERROR') {
-          errorMessage = 'The AI service encountered an error while analyzing this product. Please enter the product details manually.';
-        } else if (error.code === 'NOT_CONFIGURED') {
-          errorMessage = 'AI service is not configured. You can still enter product details manually to check the expiry date.';
-        } else if (error.code === 'MANUAL_ENTRY_REQUIRED') {
-          errorMessage = 'The AI could not identify this product. Please enter the batch code and product details manually.';
-        }
-      } else {
-        // Generic error from network or other issues
-        errorMessage = 'The AI service encountered an error. Please enter the batch code and product details manually to check the expiry date.';
-      }
+      // Set a friendly message for the modal (not an error message)
+      setAiErrorMessage('Please upload a product image, enter the batch code, and expiry date to check the product.');
 
-      // Store error message to display in modal
-      setAiErrorMessage(errorMessage);
-
-      // Automatically open manual entry modal with friendly message
+      // Immediately open manual entry modal - no error display
       setManualEntryVisible(true);
-      
-      console.log('❌ AI failed, opening manual entry modal:', errorMessage);
     } finally {
       setIsAnalyzing(false);
     }
@@ -305,12 +293,56 @@ export default function App() {
     }
   };
 
+  // Handle image picker for manual entry
+  const pickProductImage = async () => {
+    try {
+      // Request permission
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Camera roll permission is required to upload product images.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
+      // Launch image picker
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        setManualProductImage(result.assets[0].uri);
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert(
+        'Error',
+        'Failed to pick image. Please try again.',
+        [{ text: 'OK' }]
+      );
+    }
+  };
+
   // Handle manual product entry submission
   const handleManualProductSubmit = () => {
-    if (!manualProductName.trim() || !manualExpiryDate.trim()) {
+    if (!manualBatchCode.trim() || !manualExpiryDate.trim()) {
       Alert.alert(
         'Missing Information',
-        'Please enter at least the product name and expiry date.',
+        'Please enter the batch code and expiry date.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    if (!manualProductImage) {
+      Alert.alert(
+        'Missing Image',
+        'Please upload a product image.',
         [{ text: 'OK' }]
       );
       return;
@@ -335,35 +367,36 @@ export default function App() {
       }
 
       // Store values before clearing for logging
-      const savedName = manualProductName.trim();
-      const savedCategory = manualCategory.trim() || 'General';
+      const savedBatchCode = manualBatchCode.trim();
       const savedExpiryDate = manualExpiryDate;
+      const savedImageUri = manualProductImage;
 
       // Update product state with manual entry data
       setScannedProduct({
-        barcode: failedBarcode || 'Manual Entry',
-        name: savedName,
-        category: savedCategory,
+        barcode: savedBatchCode,
+        name: 'Manual Entry', // Will be updated when AI analyzes the image
+        category: 'General',
         daysLeft: daysLeft,
         shelfLifeDays: daysLeft,
         confidenceScore: 1.0, // 100% confidence for manual entry
         status: status,
         isManualEntry: true, // Flag to indicate manual entry
+        imageUri: savedImageUri, // Store image URI for potential future AI analysis
       });
 
       // Close manual entry modal and show results
       setManualEntryVisible(false);
       setFailedBarcode(null);
-      setManualProductName('');
-      setManualCategory('');
+      setManualProductImage(null);
+      setManualBatchCode('');
       setManualExpiryDate('');
       setAiErrorMessage('');
 
       console.log('✅ Manual product entry saved:', {
-        name: savedName,
-        category: savedCategory,
+        batchCode: savedBatchCode,
         expiryDate: savedExpiryDate,
         daysLeft,
+        hasImage: !!savedImageUri,
       });
     } catch (error) {
       Alert.alert(
@@ -523,8 +556,8 @@ export default function App() {
         onRequestClose={() => {
           setManualEntryVisible(false);
           setFailedBarcode(null);
-          setManualProductName('');
-          setManualCategory('');
+          setManualProductImage(null);
+          setManualBatchCode('');
           setManualExpiryDate('');
           setAiErrorMessage('');
         }}
@@ -536,56 +569,54 @@ export default function App() {
           >
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>AI Failed to Understand Product</Text>
+                <Text style={styles.modalTitle}>Manual Product Entry</Text>
                 <Text style={styles.modalSubtitle}>
-                  {aiErrorMessage || 'The AI service could not identify this product. Please enter the batch code and product details manually to check the expiry date.'}
+                  {aiErrorMessage || 'Please upload a product image, enter the batch code, and expiry date to check the product.'}
                 </Text>
               </View>
 
-              {failedBarcode && (
-                <View style={styles.scannedCodeBox}>
-                  <Text style={styles.scannedCodeLabel}>Scanned Code:</Text>
-                  <Text style={styles.scannedCodeValue}>{failedBarcode}</Text>
-                </View>
-              )}
-
-              {/* Product Name Input */}
+              {/* Product Image Upload */}
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Product Name *</Text>
-                <TextInput
-                  style={styles.input}
-                  value={manualProductName}
-                  onChangeText={setManualProductName}
-                  placeholder="e.g., Frozen Chicken, Organic Milk"
-                  placeholderTextColor="#9CA3AF"
-                  autoFocus={true}
-                />
-              </View>
-
-              {/* Category Input */}
-              <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Category (Optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  value={manualCategory}
-                  onChangeText={setManualCategory}
-                  placeholder="e.g., Meat, Dairy, Produce"
-                  placeholderTextColor="#9CA3AF"
-                />
+                <Text style={styles.inputLabel}>Product Image *</Text>
+                {manualProductImage ? (
+                  <View style={styles.imagePreviewContainer}>
+                    <Image source={{ uri: manualProductImage }} style={styles.imagePreview} />
+                    <TouchableOpacity
+                      style={styles.removeImageButton}
+                      onPress={() => setManualProductImage(null)}
+                    >
+                      <Text style={styles.removeImageButtonText}>Remove Image</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.imageUploadButton}
+                    onPress={pickProductImage}
+                  >
+                    <Text style={styles.imageUploadButtonText}>📷 Upload Product Image</Text>
+                    <Text style={styles.imageUploadHint}>Tap to select from gallery</Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
               {/* Batch Code Input */}
-              {failedBarcode && (
-                <View style={styles.inputContainer}>
-                  <Text style={styles.inputLabel}>Batch Code</Text>
-                  <TextInput
-                    style={[styles.input, styles.inputDisabled]}
-                    value={failedBarcode}
-                    editable={false}
-                    placeholderTextColor="#9CA3AF"
-                  />
-                </View>
-              )}
+              <View style={styles.inputContainer}>
+                <Text style={styles.inputLabel}>Batch Code *</Text>
+                <TextInput
+                  style={styles.input}
+                  value={manualBatchCode}
+                  onChangeText={setManualBatchCode}
+                  placeholder="Enter batch code or barcode"
+                  placeholderTextColor="#9CA3AF"
+                  autoFocus={true}
+                  keyboardType="default"
+                />
+                {failedBarcode && (
+                  <Text style={styles.inputHint}>
+                    Scanned code: {failedBarcode} (you can edit this)
+                  </Text>
+                )}
+              </View>
 
               {/* Expiry Date Input */}
               <View style={styles.inputContainer}>
@@ -610,8 +641,8 @@ export default function App() {
                   onPress={() => {
                     setManualEntryVisible(false);
                     setFailedBarcode(null);
-                    setManualProductName('');
-                    setManualCategory('');
+                    setManualProductImage(null);
+                    setManualBatchCode('');
                     setManualExpiryDate('');
                     setAiErrorMessage('');
                   }}
@@ -1096,6 +1127,49 @@ const styles = StyleSheet.create({
   modalButtonTextSubmit: {
     color: '#fff',
     fontSize: 16,
+    fontWeight: '600',
+  },
+  // Image Upload Styles
+  imageUploadButton: {
+    borderWidth: 2,
+    borderColor: '#D1D5DB',
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F9FAFB',
+  },
+  imageUploadButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 4,
+  },
+  imageUploadHint: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 4,
+  },
+  imagePreviewContainer: {
+    alignItems: 'center',
+  },
+  imagePreview: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+    marginBottom: 12,
+    resizeMode: 'cover',
+  },
+  removeImageButton: {
+    backgroundColor: '#EF4444',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
+  removeImageButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
     fontWeight: '600',
   },
 });
